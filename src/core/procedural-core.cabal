@@ -25,4 +25,6 @@ library
   build-depends:
     base,
     comonad,
-    containers
+    containers,
+    grid,
+    mwc-random

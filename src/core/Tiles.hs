@@ -1,55 +1,69 @@
-{-# LANGUAGE DeriveFoldable #-}
-{-# LANGUAGE DeriveFunctor  #-}
-{-# LANGUAGE ExplicitForAll #-}
-{-# LANGUAGE RankNTypes     #-}
+{-# LANGUAGE ExplicitForAll   #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE RankNTypes       #-}
+{-# LANGUAGE TupleSections    #-}
+{-# LANGUAGE TypeFamilies     #-}
 module Tiles where
 
-import           Control.Comonad
-import           Data.Foldable        (Foldable (..))
-import           Data.Functor.Compose
+import           Control.Monad                     (join)
+import           Control.Monad.IO.Class
+import           Data.Foldable                     (Foldable (..))
+import           Data.Map                          (Map)
+import qualified Data.Map                          as Map
+import           Data.Maybe                        (catMaybes, isNothing,
+                                                    listToMaybe)
 import           Data.Semigroup
+import qualified Data.Sequence                     as Seq
+import qualified Data.Set                          as Set
+import           Math.Geometry.Grid
+import           Math.Geometry.Grid.Square
+import           Math.Geometry.Grid.SquareInternal (SquareDirection (..))
+import           System.Random.MWC                 (asGenST, uniformR,
+                                                    withSystemRandom)
 
-data Tile f a = Tile {
-  context :: f (Tile f a),
-  content :: a
-  } deriving (Functor)
+type family Neighbours a :: *
 
-instance (Functor f, Foldable f) => Foldable (Tile f) where
-  foldMap f (Tile ct c) = f c <> fold (fmap (foldMap f) ct)
+newtype Generator k v = Generator { getGen :: Map k (Maybe v) }
 
-instance Functor f => Comonad (Tile f) where
-  extract = content
-  extend = instantiate
+-- | Populate the map using a generator function
+runGen :: (Monad m, Ord k)
+  => (k -> Neighbours k -> Maybe k)
+  -> ((Neighbours k -> Maybe v) -> m v)
+  -> Generator k v
+  -> m (Map k v)
+runGen lkp eval (Generator initial) = go initial where
+  go mp = maybe (return $ Map.fromList $ catMaybes $ sequenceA <$> Map.toList mp) proceed lst where
+    lst = listToMaybe $ filter (isNothing . snd) $ Map.toList mp
+    proceed (k, _) = do
+      let f nbh = lkp k nbh >>= join . flip Map.lookup mp
+      v <- eval f
+      go $ Map.insert k (Just v) mp
 
-data TwoDimensional a = TwoDimensional {
-    left   :: a,
-    right  :: a,
-    top    :: a,
-    bottom :: a
-  } deriving (Functor, Show, Foldable)
+-- | Populate the tiles of a grid in random order using a generator function
+runGridGen :: (MonadIO m, Monad m, Grid g, Ord (Index g), Eq (Direction g))
+  => g
+  -> ((Direction g -> Maybe v) -> m v)
+  -> Map (Index g) v -- ^ Initial constraints (may be empty)
+  -> m (Map (Index g) v)
+runGridGen gr eval initial = go initialSet initial where
+  initialSet = Seq.fromList $ Set.toList $ Set.difference
+                (Set.fromList $ indices gr)
+                (Set.fromList $ Map.keys initial)
+  go st mp =
+    if Seq.null st
+    then return mp
+    else do
+      let l = Seq.length st
+      i <- liftIO $ withSystemRandom . asGenST $ uniformR (0, pred l)
+      let Just idx = Seq.lookup i st
+          st'      = Seq.deleteAt i st
+          f nbh    = neighbour gr idx nbh >>= flip Map.lookup mp
+      v <- eval f
+      go st' $ Map.insert idx v mp
 
-instantiate :: Functor f => (Tile f a -> b) -> Tile f a -> Tile f b
-instantiate f (Tile ff c) = result where
-  result = Tile ff' (f $ Tile ff c)
-  ff' = fmap (instantiate f) ff
-
-type TwoDTile a = Tile (Compose TwoDimensional Maybe) (Int, a)
-
-threeByThree :: TwoDTile Int
-threeByThree = fmap (\i -> (i, i)) topLeft where
-  topLeft = Tile
-    (Compose $ TwoDimensional Nothing (Just topMiddle) Nothing (Just middleLeft)) 1
-  topMiddle = Tile (Compose $ TwoDimensional (Just topLeft) (Just topRight) Nothing (Just middleMiddle)) 2
-  topRight = Tile (Compose $ TwoDimensional (Just topMiddle) Nothing Nothing (Just middleRight)) 3
-
-  middleLeft = Tile (Compose $ TwoDimensional Nothing (Just middleMiddle) (Just topLeft) (Just bottomLeft)) 4
-  middleMiddle = Tile (Compose $ TwoDimensional (Just middleLeft) (Just middleRight) (Just topMiddle) (Just bottomMiddle)) 5
-  -- middleMiddle = middleLeft
-  middleRight = Tile (Compose $ TwoDimensional (Just middleMiddle) Nothing (Just topRight) (Just bottomRight)) 6
-
-  bottomLeft = Tile (Compose $ TwoDimensional Nothing (Just bottomMiddle) (Just middleLeft) Nothing) 7
-  bottomMiddle = Tile (Compose $ TwoDimensional (Just bottomLeft) (Just bottomRight) (Just middleMiddle) Nothing) 8
-  bottomRight = Tile (Compose $ TwoDimensional (Just bottomMiddle) Nothing (Just middleRight) Nothing) 9
-
-sm :: Foldable f => Tile f Double -> Double
-sm (Tile ct _) = getSum $ foldMap (Sum . content) ct
+run :: IO (Map (Int, Int) Int)
+run = runGridGen theGrid evl Map.empty where
+  theGrid = rectSquareGrid 3 3
+  evl f = result where
+    sm = getSum $ foldMap Sum $ catMaybes $ fmap f [North, East, South, West]
+    result = if sm > 1 then return sm else return 2
