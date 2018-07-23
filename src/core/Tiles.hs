@@ -41,7 +41,7 @@ runGen lkp eval (Generator initial) = go initial where
 --   function
 runGridGen :: (MonadIO m, Monad m, Grid g, Ord (Index g), Eq (Direction g), FiniteGrid g, Size g ~ (Int, Int))
   => g
-  -> ((Direction g -> Maybe v) -> m v) -- ^ How to generate a tile 'v' from the values of its neighbours
+  -> (([Direction g] -> Maybe v) -> m v) -- ^ How to generate a tile 'v' from the values of tiles around it (identified by paths)
   -> Map (Index g) v -- ^ Tiles that have already been assigned
   -> m (Map (Index g) v) -- ^ A map assigning a value to each tile
 runGridGen gr eval = go where
@@ -54,7 +54,7 @@ runGridGen gr eval = go where
 
 fillOneTile :: (MonadIO m, Monad m, Grid g, Ord (Index g), Eq (Direction g))
   => g
-  -> ((Direction g -> Maybe v) -> m v) -- ^ How to generate a tile 'v' from the values of its neighbours
+  -> (([Direction g] -> Maybe v) -> m v) -- ^ How to generate a tile 'v' from the values of its neighbours
   -> Map (Index g) v -- ^ Tiles that have already been assigned
   -> m (Map (Index g) v) -- ^ The original map with a new tile added
 fillOneTile gr evl initial = result where
@@ -69,13 +69,23 @@ fillOneTile gr evl initial = result where
       let l = Seq.length emptyTiles
       i <- liftIO $ withSystemRandom . asGenST $ uniformR (0, pred l)
       let Just idx = Seq.lookup i emptyTiles
-          f nbh    = neighbour gr idx nbh >>= flip Map.lookup initial
-      v <- evl f
+          f idx' []     = Map.lookup idx' initial
+          f idx' (n:ns) = neighbour gr idx' n >>= \nb -> f nb ns
+      v <- evl (f idx)
       return $ Map.insert idx v initial
 
 run :: IO (Map (Int, Int) Int)
 run = runGridGen theGrid evl Map.empty where
-  theGrid = rectSquareGrid 3 3
+  theGrid = rectSquareGrid 4 4
+  surroundings = [
+    [North, West],
+    [North],
+    [North, East],
+    [West],
+    [East],
+    [South, West],
+    [South],
+    [South, East]]
   evl f = result where
-    sm = getSum $ foldMap Sum $ catMaybes $ fmap f [North, East, South, West]
+    sm = getSum $ foldMap Sum $ catMaybes $ fmap f surroundings
     result = if sm > 1 then return sm else return 2
