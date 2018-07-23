@@ -1,7 +1,6 @@
 {-# LANGUAGE ExplicitForAll   #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE RankNTypes       #-}
-{-# LANGUAGE TupleSections    #-}
 {-# LANGUAGE TypeFamilies     #-}
 module Tiles where
 
@@ -14,7 +13,6 @@ import           Data.Maybe                        (catMaybes, isNothing,
                                                     listToMaybe)
 import           Data.Semigroup
 import qualified Data.Sequence                     as Seq
-import qualified Data.Set                          as Set
 import           Math.Geometry.Grid
 import           Math.Geometry.Grid.Square
 import           Math.Geometry.Grid.SquareInternal (SquareDirection (..))
@@ -39,27 +37,41 @@ runGen lkp eval (Generator initial) = go initial where
       v <- eval f
       go $ Map.insert k (Just v) mp
 
--- | Populate the tiles of a grid in random order using a generator function
-runGridGen :: (MonadIO m, Monad m, Grid g, Ord (Index g), Eq (Direction g))
+-- | Populate the tiles of a finite grid in random order using a generator
+--   function
+runGridGen :: (MonadIO m, Monad m, Grid g, Ord (Index g), Eq (Direction g), FiniteGrid g, Size g ~ (Int, Int))
   => g
-  -> ((Direction g -> Maybe v) -> m v)
-  -> Map (Index g) v -- ^ Initial constraints (may be empty)
-  -> m (Map (Index g) v)
-runGridGen gr eval initial = go initialSet initial where
-  initialSet = Seq.fromList $ Set.toList $ Set.difference
-                (Set.fromList $ indices gr)
-                (Set.fromList $ Map.keys initial)
-  go st mp =
-    if Seq.null st
+  -> ((Direction g -> Maybe v) -> m v) -- ^ How to generate a tile 'v' from the values of its neighbours
+  -> Map (Index g) v -- ^ Tiles that have already been assigned
+  -> m (Map (Index g) v) -- ^ A map assigning a value to each tile
+runGridGen gr eval = go where
+  sz = size gr
+  numTiles = uncurry (*) sz
+  go mp =
+    if Map.size mp >= numTiles
     then return mp
+    else fillOneTile gr eval mp >>= go
+
+fillOneTile :: (MonadIO m, Monad m, Grid g, Ord (Index g), Eq (Direction g))
+  => g
+  -> ((Direction g -> Maybe v) -> m v) -- ^ How to generate a tile 'v' from the values of its neighbours
+  -> Map (Index g) v -- ^ Tiles that have already been assigned
+  -> m (Map (Index g) v) -- ^ The original map with a new tile added
+fillOneTile gr evl initial = result where
+  emptyTiles = Seq.fromList
+    $ take 10000 -- avoid an infinite loop if the grid is unbounded
+    $ filter (not . flip Map.member initial)
+    $ indices gr
+  result =
+    if Seq.null emptyTiles
+    then return initial
     else do
-      let l = Seq.length st
+      let l = Seq.length emptyTiles
       i <- liftIO $ withSystemRandom . asGenST $ uniformR (0, pred l)
-      let Just idx = Seq.lookup i st
-          st'      = Seq.deleteAt i st
-          f nbh    = neighbour gr idx nbh >>= flip Map.lookup mp
-      v <- eval f
-      go st' $ Map.insert idx v mp
+      let Just idx = Seq.lookup i emptyTiles
+          f nbh    = neighbour gr idx nbh >>= flip Map.lookup initial
+      v <- evl f
+      return $ Map.insert idx v initial
 
 run :: IO (Map (Int, Int) Int)
 run = runGridGen theGrid evl Map.empty where
